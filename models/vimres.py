@@ -89,6 +89,13 @@ class VisionEncoderMambaBlock(nn.Module):
         x = rearrange(x, "b d s -> b s d")
         x = ssm(x)
         return x
+
+def output_head(dim: int, num_classes: int):
+    return nn.Sequential(
+        Reduce("b s d -> b d", "mean"),
+        nn.LayerNorm(dim),
+        nn.Linear(dim, num_classes),
+    )
     
 class VimRes(nn.Module):
     def __init__(
@@ -101,11 +108,57 @@ class VimRes(nn.Module):
         image_size: int = 28,
         patch_size: int = 4,
         channels: int = 3,
-        dropout: float = 0.1,
-        depth: int = 12,
-        resnet_model='resnet18'
+        resnet_model='resnet18',
         *args,
         **kwargs,
     ):
-        resnet = getattr(models, resnet_type)(pretrained=True)
-        self.resnet_stream = nn.Sequential(*list(resnet.children())[:-2])
+        super().__init__()
+        self.dim = dim
+        self.dt_rank = dt_rank
+        self.dim_inner = dim_inner
+        self.d_state = d_state
+        self.num_classes = num_classes
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.channels = channels
+        
+        image_height, image_width = pair(image_size)
+        patch_height, patch_width = pair(patch_size)
+        patch_dim = channels * patch_height * patch_width
+        num_patches = (self.image_size // self.patch_size) ** 2
+
+        self.to_patch_embedding = nn.Sequential(
+            Rearrange(
+                "b c (h p1) (w p2) -> b (h w) (p1 p2 c)",
+                p1=patch_height,
+                p2=patch_height,
+            ),
+            nn.Linear(patch_dim, dim),
+        )
+        
+        resnet = getattr(models, resnet_model)(pretrained=True)
+        resnet_add = [
+            nn.Conv2d(512, 512, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False),
+            nn.BatchNorm2d(512, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, num_patches, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False),
+            nn.BatchNorm2d(num_patches, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True),
+            nn.Linear(1, 128)
+        ]
+        self.resnet_stream = list(resnet.children())[:-2]
+        self.resnet_stream = self.resnet_stream + resnet_add
+        self.resnet_stream = nn.Sequential(*self.resnet_stream)
+        self.vm_encoder = VisionEncoderMambaBlock(dim=dim, dt_rank=dt_rank, dim_inner=dim_inner, d_state=d_state)
+        self.to_latent = nn.Identity()
+        self.output = output_head(dim, num_classes)
+
+    def forward (self, x: Tensor):
+        b, c, h, w = x.shape
+
+        x1 = self.to_patch_embedding(x)
+        x1 = self.vm_encoder(x1)
+        x2 = self.resnet_stream(x).permute(0, 1, 3, 2).squeeze(-1)
+        x = self.to_latent(x1 + x2)
+        x = self.output(x)
+
+        return x

@@ -9,7 +9,7 @@ models_dict = {
     'densenet': models.DenseNet,
     'vit': models.ViT,
     'vim': models.Vim,
-    'vimhybrid': 0
+    'vimhybrid': models.VimRes,
 }
 
 def pipeline ():
