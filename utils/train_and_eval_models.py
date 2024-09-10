@@ -4,6 +4,8 @@ import torch
 
 from tqdm import tqdm
 
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
 class EarlyStopping:
     def __init__(self, patience=5, verbose=False, delta=0.01, mode='min', path='checkpoints/checkpoint.pt'):
         self.patience = patience
